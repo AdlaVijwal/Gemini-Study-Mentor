@@ -1,0 +1,250 @@
+# agent.py – Gemini Study Mentor with LoopAgent quiz practice
+#
+# Track: Agents for Good (Education)
+# Features:
+# - Multi-agent system (planner, quiz, explanation, analytics, resources)
+# - LoopAgent for repeated quiz+explanation rounds
+# - Tools (simple in-memory “DB” for user & quiz history)
+# - Basic context compaction
+
+from typing import Dict, List, Any
+import datetime
+
+from google.adk.agents import LlmAgent, SequentialAgent, LoopAgent  # <- added LoopAgent
+
+
+# ---------------------------------------------------------------------
+# 1. Global config & in-memory “DB”
+# ---------------------------------------------------------------------
+
+# 🔴 IMPORTANT: put the model that is ALREADY WORKING for you here.
+# e.g. "gemini-2.5-flash" or whatever you currently use.
+GEMINI_MODEL = "gemini-2.5-flash"
+
+USER_DB: Dict[str, Dict[str, Any]] = {}
+QUIZ_DB: Dict[str, List[Dict[str, Any]]] = {}
+
+
+# ---------------------------------------------------------------------
+# 2. Tools – callable from agents
+# ---------------------------------------------------------------------
+
+def save_user_profile(user_id: str, goals: str, exam: str, time_per_day_hours: float) -> Dict[str, Any]:
+    USER_DB.setdefault(user_id, {})
+    USER_DB[user_id].update(
+        {
+            "goals": goals,
+            "exam": exam,
+            "time_per_day_hours": time_per_day_hours,
+            "last_updated": datetime.datetime.utcnow().isoformat(),
+        }
+    )
+    print(f"[TOOL] save_user_profile for {user_id}")
+    return {"status": "success", "user_profile": USER_DB[user_id]}
+
+
+def load_user_profile(user_id: str) -> Dict[str, Any]:
+    print(f"[TOOL] load_user_profile for {user_id}")
+    profile = USER_DB.get(user_id)
+    if not profile:
+        return {"status": "not_found", "user_profile": {}}
+    return {"status": "success", "user_profile": profile}
+
+
+def save_quiz_result(
+    user_id: str,
+    topic: str,
+    question: str,
+    user_answer: str,
+    correct_answer: str,
+    is_correct: bool,
+) -> Dict[str, Any]:
+    QUIZ_DB.setdefault(user_id, [])
+    record = {
+        "topic": topic,
+        "question": question,
+        "user_answer": user_answer,
+        "correct_answer": correct_answer,
+        "is_correct": is_correct,
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+    }
+    QUIZ_DB[user_id].append(record)
+    print(f"[TOOL] save_quiz_result for {user_id}, topic={topic}, correct={is_correct}")
+    return {"status": "success"}
+
+
+def load_quiz_history(user_id: str) -> Dict[str, Any]:
+    history = QUIZ_DB.get(user_id, [])
+    print(f"[TOOL] load_quiz_history for {user_id}, count={len(history)}")
+    return {"status": "success", "history": history}
+
+
+def compact_study_history(user_id: str) -> Dict[str, Any]:
+    history = QUIZ_DB.get(user_id, [])
+    correct = sum(1 for h in history if h["is_correct"])
+    total = len(history)
+    summary = f"User {user_id} has answered {total} questions with {correct} correct."
+    print(f"[TOOL] compact_study_history for {user_id}: {summary}")
+
+    USER_DB.setdefault(user_id, {})
+    USER_DB[user_id]["study_summary"] = summary
+
+    return {"status": "success", "summary": summary}
+
+
+# ---------------------------------------------------------------------
+# 3. LLM Agents (sub-agents)
+# ---------------------------------------------------------------------
+
+# 3.1 Study Planner Agent
+study_planner_agent = LlmAgent(
+    name="study_planner_agent",
+    model=GEMINI_MODEL,
+    description="Creates a personalized multi-day study plan for the student.",
+    instruction=(
+        "You are a professional exam study planner agent helping students prepare for aptitude and coding exams "
+        "(like TCS NQT, campus placements, etc.).\n\n"
+        "You MUST:\n"
+        "- Use 'load_user_profile' when a user_id is provided to understand the user.\n"
+        "- Use 'save_user_profile' when the user shares their goals/exam/time.\n"
+        "- Consider exam type, goals, time per day, and (if available) their 'study_summary'.\n"
+        "- Output a structured, day-wise study plan in Markdown with headings like 'Day 1', 'Day 2', etc.\n"
+        "- Distribute time across Quant, Reasoning, Verbal, and (optionally) Coding.\n"
+    ),
+    tools=[save_user_profile, load_user_profile],
+    output_key="study_plan",
+)
+
+# 3.2 Quiz Generator Agent
+quiz_generator_agent = LlmAgent(
+    name="quiz_generator_agent",
+    model=GEMINI_MODEL,
+    description="Generates practice questions for a given topic and difficulty.",
+    instruction=(
+        "You are a quiz generator agent for competitive exams.\n\n"
+        "You MUST:\n"
+        "- Generate 5 multiple-choice questions for the requested topic and difficulty "
+        "  (e.g., 'easy', 'medium').\n"
+        "- For each question, include:\n"
+        "  - The question text\n"
+        "  - Four options labeled A, B, C, D\n"
+        "  - Clearly indicate the correct option as 'Answer: X'\n"
+        "  - Provide a short 1–3 line explanation of the answer.\n"
+        "- Return the quiz in clean Markdown:\n"
+        "  Q1. ...\n"
+        "  A) ...\n"
+        "  B) ...\n"
+        "  C) ...\n"
+        "  D) ...\n"
+        "  Answer: X\n"
+        "  Explanation: ...\n"
+        "- Assume another agent may read this quiz and explain one of the questions.\n"
+    ),
+    output_key="generated_quiz",
+)
+
+# 3.3 Explanation Agent (now loop-friendly)
+explanation_agent = LlmAgent(
+    name="explanation_agent",
+    model=GEMINI_MODEL,
+    description="Explains answers and user mistakes step-by-step.",
+    instruction=(
+        "You are an explanation agent.\n\n"
+        "You may receive:\n"
+        "- The quiz markdown generated by another agent (stored in the shared context as 'generated_quiz').\n"
+        "- Optionally, the student's chosen answer and topic.\n\n"
+        "Behave as follows:\n"
+        "1. If you see a full quiz in the context (with multiple Qs), pick the FIRST question and:\n"
+        "   - Restate the question.\n"
+        "   - Show the correct option.\n"
+        "   - Provide a step-by-step explanation.\n"
+        "   - Optionally, assume a common wrong option and explain why it's wrong.\n"
+        "2. If you are explicitly given a single question, correct answer, and student's answer,\n"
+        "   then explain why the correct answer is right and the student's answer is wrong.\n"
+        "3. End with 1–2 short tips for this topic.\n"
+        "4. When information is available (user_id, topic, question, user_answer, correct_answer),\n"
+        "   call the 'save_quiz_result' tool to log the attempt.\n"
+    ),
+    tools=[save_quiz_result],
+    output_key="explanation_output",
+)
+
+# 3.4 Progress Analyst Agent
+progress_analyst_agent = LlmAgent(
+    name="progress_analyst_agent",
+    model=GEMINI_MODEL,
+    description="Analyzes quiz history and suggests next topics.",
+    instruction=(
+        "You are a progress analytics agent.\n\n"
+        "You MUST:\n"
+        "- Use 'load_quiz_history' with the provided user_id to load past attempts.\n"
+        "- Use 'compact_study_history' to generate a short summary note.\n"
+        "- Identify 2–3 strong topics and 2–3 weak topics from the history.\n"
+        "- Suggest 2–3 topics to prioritize next, with difficulty (easy/medium/hard).\n"
+        "- Output your report in Markdown with sections:\n"
+        "  - Overall Summary\n"
+        "  - Strong Topics\n"
+        "  - Weak Topics\n"
+        "  - Recommended Next Steps\n"
+    ),
+    tools=[load_quiz_history, compact_study_history],
+    output_key="progress_report",
+)
+
+# 3.5 Resource Finder Agent
+resource_finder_agent = LlmAgent(
+    name="resource_finder_agent",
+    model=GEMINI_MODEL,
+    description="Suggests resources for the student's weak topics.",
+    instruction=(
+        "You are a resource recommendation agent for exam prep.\n\n"
+        "You will be given:\n"
+        "- The exam type (e.g., TCS NQT).\n"
+        "- The student's weak topics or recommended focus areas.\n\n"
+        "You MUST:\n"
+        "- Suggest TYPES of resources, for example:\n"
+        "  - 'YouTube playlist on <topic>'\n"
+        "  - 'Standard aptitude book chapter (e.g., R.S. Aggarwal) on <topic>'\n"
+        "  - 'Online mock tests / practice sites'\n"
+        "- DO NOT invent specific URLs.\n"
+        "- Instead, describe the resource and how the student should search for it.\n"
+        "- Output bullet points grouped by topic.\n"
+    ),
+    output_key="resource_suggestions",
+)
+
+
+# ---------------------------------------------------------------------
+# 4. LoopAgent: repeated quiz + explanation rounds
+# ---------------------------------------------------------------------
+
+quiz_practice_loop = LoopAgent(
+    name="quiz_practice_loop",
+    description=(
+        "Runs multiple rounds of quiz generation + explanation in a loop for practice."
+    ),
+    sub_agents=[
+        quiz_generator_agent,
+        explanation_agent,
+    ],
+    max_iterations=3,  # do 3 rounds in one session; adjust as needed
+)
+
+
+# ---------------------------------------------------------------------
+# 5. Root workflow: plan once, then run quiz loop, then analysis + resources
+# ---------------------------------------------------------------------
+
+root_agent = SequentialAgent(
+    name="gemini_study_mentor_root",
+    description=(
+        "Root workflow agent for the Gemini Study Mentor. "
+        "Executes: study planning -> multi-round quiz practice -> progress analysis -> resources."
+    ),
+    sub_agents=[
+        study_planner_agent,   # once
+        quiz_practice_loop,    # repeated quiz+explanation rounds
+        progress_analyst_agent,
+        resource_finder_agent,
+    ],
+)
