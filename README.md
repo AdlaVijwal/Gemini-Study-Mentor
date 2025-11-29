@@ -1,7 +1,6 @@
 # Gemini Study Mentor – Multi-Agent Exam Prep Assistant
 
 **Track:** Agents for Good (Education)  
-**Capstone:** 5-Day AI Agents Intensive with Google – Gemini
 
 ---
 
