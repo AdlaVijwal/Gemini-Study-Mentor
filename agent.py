@@ -1,33 +1,12 @@
-# agent.py – Gemini Study Mentor with LoopAgent quiz practice
-#
-# Track: Agents for Good (Education)
-# Features:
-# - Multi-agent system (planner, quiz, explanation, analytics, resources)
-# - LoopAgent for repeated quiz+explanation rounds
-# - Tools (simple in-memory “DB” for user & quiz history)
-# - Basic context compaction
-
 from typing import Dict, List, Any
 import datetime
 
-from google.adk.agents import LlmAgent, SequentialAgent, LoopAgent  # <- added LoopAgent
+from google.adk.agents import LlmAgent, SequentialAgent, LoopAgent
 
-
-# ---------------------------------------------------------------------
-# 1. Global config & in-memory “DB”
-# ---------------------------------------------------------------------
-
-# 🔴 IMPORTANT: put the model that is ALREADY WORKING for you here.
-# e.g. "gemini-2.5-flash" or whatever you currently use.
 GEMINI_MODEL = "gemini-2.5-flash"
 
 USER_DB: Dict[str, Dict[str, Any]] = {}
 QUIZ_DB: Dict[str, List[Dict[str, Any]]] = {}
-
-
-# ---------------------------------------------------------------------
-# 2. Tools – callable from agents
-# ---------------------------------------------------------------------
 
 def save_user_profile(user_id: str, goals: str, exam: str, time_per_day_hours: float) -> Dict[str, Any]:
     USER_DB.setdefault(user_id, {})
@@ -91,12 +70,6 @@ def compact_study_history(user_id: str) -> Dict[str, Any]:
 
     return {"status": "success", "summary": summary}
 
-
-# ---------------------------------------------------------------------
-# 3. LLM Agents (sub-agents)
-# ---------------------------------------------------------------------
-
-# 3.1 Study Planner Agent
 study_planner_agent = LlmAgent(
     name="study_planner_agent",
     model=GEMINI_MODEL,
@@ -114,8 +87,6 @@ study_planner_agent = LlmAgent(
     tools=[save_user_profile, load_user_profile],
     output_key="study_plan",
 )
-
-# 3.2 Quiz Generator Agent
 quiz_generator_agent = LlmAgent(
     name="quiz_generator_agent",
     model=GEMINI_MODEL,
@@ -143,7 +114,6 @@ quiz_generator_agent = LlmAgent(
     output_key="generated_quiz",
 )
 
-# 3.3 Explanation Agent (now loop-friendly)
 explanation_agent = LlmAgent(
     name="explanation_agent",
     model=GEMINI_MODEL,
@@ -168,8 +138,6 @@ explanation_agent = LlmAgent(
     tools=[save_quiz_result],
     output_key="explanation_output",
 )
-
-# 3.4 Progress Analyst Agent
 progress_analyst_agent = LlmAgent(
     name="progress_analyst_agent",
     model=GEMINI_MODEL,
@@ -190,8 +158,6 @@ progress_analyst_agent = LlmAgent(
     tools=[load_quiz_history, compact_study_history],
     output_key="progress_report",
 )
-
-# 3.5 Resource Finder Agent
 resource_finder_agent = LlmAgent(
     name="resource_finder_agent",
     model=GEMINI_MODEL,
@@ -213,11 +179,6 @@ resource_finder_agent = LlmAgent(
     output_key="resource_suggestions",
 )
 
-
-# ---------------------------------------------------------------------
-# 4. LoopAgent: repeated quiz + explanation rounds
-# ---------------------------------------------------------------------
-
 quiz_practice_loop = LoopAgent(
     name="quiz_practice_loop",
     description=(
@@ -227,13 +188,8 @@ quiz_practice_loop = LoopAgent(
         quiz_generator_agent,
         explanation_agent,
     ],
-    max_iterations=3,  # do 3 rounds in one session; adjust as needed
+    max_iterations=3,
 )
-
-
-# ---------------------------------------------------------------------
-# 5. Root workflow: plan once, then run quiz loop, then analysis + resources
-# ---------------------------------------------------------------------
 
 root_agent = SequentialAgent(
     name="gemini_study_mentor_root",
@@ -242,8 +198,8 @@ root_agent = SequentialAgent(
         "Executes: study planning -> multi-round quiz practice -> progress analysis -> resources."
     ),
     sub_agents=[
-        study_planner_agent,   # once
-        quiz_practice_loop,    # repeated quiz+explanation rounds
+        study_planner_agent,
+        quiz_practice_loop,
         progress_analyst_agent,
         resource_finder_agent,
     ],
